@@ -19,7 +19,7 @@ local fontHeight = floor(select(2, _G[fontName]:GetFont()) + 0.5)
 -- Sizes of objects
 local iconSize = 96 -- Width and height of each icon
 local gap = fontHeight/2 -- Free space around and between objects
-local barHeight = fontHeight + gap
+local barHeight = fontHeight + gap -- Height of player's health bar
 
 -- Create objects
 local frame = CreateFrame("Frame", addonName, UIParent, "SimplePanelTemplate") -- Frame defined in SharedXML/SharedUIPanelTemplates.xml
@@ -33,7 +33,7 @@ local frame = CreateFrame("Frame", addonName, UIParent, "SimplePanelTemplate") -
 	frame.bar = CreateFrame("StatusBar", nil, frame)
 		frame.health = frame.bar:CreateFontString(nil, "OVERLAY", fontName)
 	frame.button = CreateFrame("Button", nil, frame, "MagicButtonTemplate") -- Button defined in SharedXML/SharedUIPanelTemplates.xml
-local timer
+local timer -- Currently unused (see commented-out text in events:COMBAT_LOG_EVENT_UNFILTERED())
 
 -- Set the position and size of the frame (leave room for the widgets within frame.Inset)
 local left, top = select(4, frame.Inset:GetPointByName("TOPLEFT"))
@@ -43,12 +43,12 @@ local height = -top + (5 * gap) + iconSize + (3 * fontHeight) + barHeight + bott
 
 -- Collect some text strings into a handy table
 local text = {
-	tooltip = addonName .. ":\nWhat a lovely tooltip!",
-	initialise = addonName .. ": Addon is initialising ...",
-	loaded = addonName .. ": Addon has loaded",
-	logout = addonName .. ": Time for a break ...",
+	tooltip = addonName .. ":\nEvery frame should have a tooltip.  This is mine.",
+	loaded = addonName .. ": Ready for pull-timer ...",
+	logout = addonName .. ": Run away, little girl ...",
 }
 
+-- Icons for the ENVIRONMENTAL_DAMAGE subevent (which does not provide one)
 local damageIcon = {}
 	damageIcon.Drowning = 1385912
 	damageIcon.Falling = 132301
@@ -57,18 +57,18 @@ local damageIcon = {}
 	damageIcon.Lava = 237583
 	damageIcon.Slime = 134437
 
--- Array of field names for the payload to COMBAT_LOG_EVENT_UNFILTERED
+-- Array of field names for the payload to COMBAT_LOG_EVENT_UNFILTERED (currently unused)
 local payloadKey = {timestamp,	subevent, hideCaster, sourceGUID, sourceName, sourceFlags, sourceRaidFlags, destGUID, destName, destFlags, destRaidFlags, 
 	spellId, spellName, spellSchool, 
 	amount, overkill, school, resisted, blocked, absorbed, critical, glancing, crushing, isOffHand, environmentalType }
 
 -- Array of timestamps and damage over the last few seconds' worth of COMBAT_LOG_EVENT_UNFILTERED events
-local fade = 2 -- Fade out display over 2 seconds, after each COMBAT_LOG_EVENT_UNFILTERED event
-local durationDTPS = 5 -- Include the last 5 seconds of events
-local DTPS = {}
+local DTPS = {} -- Time series used to calculate average DTPS over the last few seconds (weighted towards more recent damage)
+local fade = 2 -- Period over which to fade out the display (after each COMBAT_LOG_EVENT_UNFILTERED event)
+local durationDTPS = 5 -- Include the last 5 seconds of damage in the DTPS calculation
 
 -----------------------------------------------------------------------------
--- SECTION 1.1: Debugging utilities (remove before release)
+-- SECTION 1.1: Debugging utilities 
 -----------------------------------------------------------------------------
 -- Debugging function to recursively print the contents of a table (eg. a frame)
 local function dumpTable(tbl, lvl) -- Parameters are the table(tbl) and (optionally) a prefix for each line (default is ".")
@@ -81,25 +81,36 @@ local function dumpTable(tbl, lvl) -- Parameters are the table(tbl) and (optiona
 	end
 end
 
+-- Print out the payload from a COMBAT_LOG_EVENT_UNFILTERED event
+local function dumpCLEU(payload)
+	local fields = getn(payload)
+	print(format("dumpCLEU: Found %d elements in the payload array", fields))
+	for i = 1, fields do
+		print(format("[%d]: %s", i, tostring(payload[i])))
+	end
+	print("dumpCLEU: Finished")
+end
+
 --------------------------------------------------------------------------------------
 -- SECTION 2.1: Callback and support functions for the parent frames and child widgets
 --------------------------------------------------------------------------------------
 -- Initialise icon and font strings (also occurs after a few seconds with no damage - see events:COMBAT_LOG_EVENT_UNFILTERED())
+-- Currently unused because, due to frame fadeout, these values would never be seen
 local function initialiseWidgets()
-	frame.icon:SetTexture(133712) -- Skull icon signifying no damage over the last few seconds
+	frame.icon:SetTexture(133712) -- Happy party bomb icon signifying no damage over the last few seconds
 	frame.amountDTPS:SetText("0")
 	frame.spellName:SetText("No Damage")
 	frame.amountDMG:SetText("0")
 	frame:Hide()
 end
 
--- Set up the periodic damage icon (center of the frame)
+-- Set up the damage icon (center of the frame)
 local function setIcon()
 	local icon = frame.icon
 	icon:SetPoint("TOPLEFT", frame.Inset.Bg, "TOPLEFT", gap, -(2 * (fontHeight + gap)))
 	icon:SetSize(iconSize, iconSize)
 
-	local mask = frame.mask
+	local mask = frame.mask -- Nice yellow frame to tidy-up the damage icon
 	mask:SetPoint("CENTER", frame.icon)
 	mask:SetSize(iconSize, iconSize)
 	mask:SetAtlas("talents-node-choiceflyout-square-yellow", false)
@@ -121,7 +132,7 @@ local function setHealth()
 	bar.blue = 0
 end	
 
--- Set up FontStrings for total DTPS, damage name, damage amount and player's health percentage
+-- Set up FontStrings for total DTPS, damage name (or source), damage amount and player's health percentage
 local function setFontStrings()
 	local fs = frame.titleDTPS
 	fs:SetPoint("TOPLEFT", frame, "TOPLEFT", left + gap, -(4 + gap))
@@ -139,12 +150,11 @@ local function setFontStrings()
 	fs = frame.titleDMG
 	fs:SetPoint("TOPLEFT", frame.icon, "BOTTOMLEFT", 0, -gap)
 	fs:SetPoint("BOTTOMLEFT", frame.icon, "BOTTOMLEFT", 0, -(gap + fontHeight))
-	fs:SetText("Dmg:")
+	fs:SetText("Damage:")
 
 	fs = frame.amountDMG
 	fs:SetPoint("TOPRIGHT", frame.icon, "BOTTOMRIGHT", 0, -gap)
 	fs:SetPoint("BOTTOMRIGHT", frame.icon, "BOTTOMRIGHT", 0, -(gap + fontHeight))
-	fs:SetText("0")
 
 	fs = frame.health
 	fs:SetPoint("TOPLEFT", frame.bar, "TOPLEFT", gap/2, 0)
@@ -207,7 +217,7 @@ frame:SetScript("OnMouseUp", function(self, button) self:StopMovingOrSizing() en
 
 -- Display the mouseover tooltip
 frame:SetScript("OnEnter", function(self, motion)
-	GameTooltip:SetOwner(self, "ANCHOR_PRESERVE") -- Keeps the tooltip text in its default position
+	GameTooltip:SetOwner(self, "ANCHOR_PRESERVE") -- Allegedly keeps the tooltip text in its default position
 	GameTooltip:AddLine(text.tooltip)
 	GameTooltip:Show()
 end)
@@ -218,33 +228,23 @@ frame:SetScript("OnLeave", function(self, motion) GameTooltip:Hide() end)
 -----------------------------------------------------------------------------
 -- SECTION 3.1: Callback and support functions for the event handlers
 -----------------------------------------------------------------------------
--- Print out the payload from a COMBAT_LOG_EVENT_UNFILTERED event
-local function dumpCLEU(payload)
-	local fields = getn(payload)
-	print(format("dumpCLEU: Found %d elements in the payload array", fields))
-	for i = 1, length do
-		print(format("[%d]: %s", i, tostring(payload[i])))
-	end
-	print("dumpCLEU: Finished")
-end
-
 -- Update "Damage Taken Per Second" (over the last few seconds)
 local function updateDTPS(timestamp, amount)
-	tinsert(DTPS, {timestamp, amount}) -- Add new damage to array
+	tinsert(DTPS, {timestamp, amount}) -- Add new time/damage pair to the set
 
-	local now = GetServerTime()	-- Remove expired damage (ie. more than a few seconds old) from array 
+	local now = GetServerTime()	-- Remove expired damage (ie. more than a few seconds old) from the set 
 	while ((now - DTPS[1][1]) > durationDTPS) do
 		tremove(DTPS, 1)
 	end
 
-	local total, base = 0, 0
+	local total, base = 0, 0 -- Calculate weighted average damage over the last few seconds
 	local weight
-	for i, v in ipairs(DTPS) do -- Calculate weighted average damage over the last few seconds
+	for i, v in ipairs(DTPS) do
 		weight = durationDTPS - (now - v[1]) -- Weight recent damage more heavily than older damage
 		total = total + (weight * v[2])
 		base = base + weight
 	end
-	return floor(0.5 + (total / base))
+	return floor(0.5 + (total / base)) -- Round the result to the nearest integer
 end
 
 -----------------------------------------------------------------------------
@@ -277,22 +277,22 @@ function events:COMBAT_LOG_EVENT_UNFILTERED()
 			else frame.icon:SetTexture(237274) -- Skull icon signifying source of damage is hidden
 			end
 			frame.amountDMG:SetText(payload[12])
-			frame.mask:SetVertexColor(1, 1, 1)
+			frame.mask:SetVertexColor(1, 1, 1) -- Yellow frame for SWING_DAMAGE
 
 		elseif (subevent == "ENVIRONMENTAL_DAMAGE") then
 			frame.amountDTPS:SetText(updateDTPS(eventTime, payload[13]))
 			frame.spellName:SetText(payload[12])
 			frame.icon:SetTexture(damageIcon[payload[12]])
 			frame.amountDMG:SetText(payload[13])
-			frame.mask:SetVertexColor(1, 0, 0)
+			frame.mask:SetVertexColor(1, 0, 0) -- Red frame for ENVIRONMENTAL_DAMAGE
 
 		else 
 			frame.amountDTPS:SetText(updateDTPS(eventTime, payload[15]))
 			frame.spellName:SetText(payload[13])
 			frame.icon:SetTexture(select(3, GetSpellInfo(payload[12])))
 			frame.amountDMG:SetText(payload[15])
-			if (subevent == "SPELL_PERIODIC_DAMAGE") then frame.mask:SetVertexColor(1, 0, 0)
-			else frame.mask:SetVertexColor(1, 1, 1)
+			if (subevent == "SPELL_PERIODIC_DAMAGE") then frame.mask:SetVertexColor(1, 0, 0) -- Red frame
+			else frame.mask:SetVertexColor(1, 1, 1) -- Yellow frame for RANGE_DAMAGE and SPELL_DAMAGE
 			end
 		end
 --	if (timer) then timer:Cancel() end -- Cancel any existing timer 
@@ -379,6 +379,7 @@ end
 helptext.reset = "Reset the position of the parent frame"
 
 -- Display the player's standing with the Obsidian Warders or Dark Talons (as the case may be)
+-- This is only here because the standard UI does not make this information available
 slash.renown = function ()
 	local faction
 	if (UnitFactionGroup("player") == "Alliance") then faction = 2524 -- Faction ID 2524 is the Obsidian Warders
