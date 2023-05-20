@@ -14,7 +14,6 @@ local playerGUID -- player's GUID (used to filter combat log events)
 -- Fonts
 local fontName = "NumberFont_Shadow_Med"
 local fontHeight = floor(select(2, _G[fontName]:GetFont()) + 0.5)
---print(_G[fontName]:GetJustifyV())
 
 -- Sizes of objects
 local iconSize = 96 -- Width and height of each icon
@@ -74,7 +73,7 @@ local fadeOther = 6 -- In respect of other types of damage, fade out frame over 
 -----------------------------------------------------------------------------
 -- SECTION 1.1: Debugging utilities 
 -----------------------------------------------------------------------------
--- Debugging function to recursively print the contents of a table (eg. a frame)
+-- Recursively print the contents of a table (eg. a frame)
 local function dumpTable(tbl, lvl) -- Parameters are the table(tbl) and (optionally) a prefix for each line (default is ".")
 	if (type(lvl) ~= "string") then lvl = "." end
 	for k, v in pairs(tbl) do 
@@ -85,7 +84,7 @@ local function dumpTable(tbl, lvl) -- Parameters are the table(tbl) and (optiona
 	end
 end
 
--- Print out the payload from a COMBAT_LOG_EVENT_UNFILTERED event
+-- Print the payload from a COMBAT_LOG_EVENT_UNFILTERED
 local function dumpCLEU(payload)
 	local fields = getn(payload)
 	print(format("dumpCLEU: Found %d elements in the payload array", fields))
@@ -117,7 +116,7 @@ local function setHealth()
 	bar:SetPoint("TOPLEFT", frame.Inset.Bg, "BOTTOMLEFT", gap, barHeight + gap)
 	bar:SetPoint("BOTTOMRIGHT", frame.Inset.Bg, "BOTTOMRIGHT", -gap, gap)
 	bar:SetStatusBarTexture("_Legionfall_BarFill_UnderConstruction", "ARTWORK", -8)
-	bar:SetRotatesTexture(false)
+--	bar:SetRotatesTexture(false)
 
 	bar.health = 0
 	bar.maxHealth = 0
@@ -133,7 +132,7 @@ local function setFontStrings()
 	fs:SetPoint("BOTTOMLEFT", frame, "TOPLEFT", left + gap, -(4 + gap + fontHeight))
 	fs:SetText("DTPS:")
 
-	local fs = frame.amountDTPS
+	fs = frame.amountDTPS
 	fs:SetPoint("TOPRIGHT", frame, "TOPRIGHT", right - gap, -(4 + gap))
 	fs:SetPoint("BOTTOMRIGHT", frame, "TOPRIGHT", right - gap, -(4 + gap + fontHeight))
 
@@ -244,7 +243,7 @@ local function updateDTPS(timestamp, amount)
 	local total, base = 0, 0 -- Calculate weighted average damage over the last few seconds
 	local weight
 	for i, v in ipairs(DTPS) do
-		weight = durationDTPS - (now - v[1]) -- Weight recent damage more heavily than older damage
+		weight = (durationDTPS * 2) - (now - v[1]) -- Weight recent damage more heavily than older damage
 		total = total + (weight * v[2])
 		base = base + weight
 	end
@@ -256,20 +255,22 @@ end
 -----------------------------------------------------------------------------
 local events = {}
 
--- Process combat log events in respect of damage to the player
+-- Display combat log events in respect of damage to the player
 function events:COMBAT_LOG_EVENT_UNFILTERED()
 	local payload = {CombatLogGetCurrentEventInfo()}
-	if (payload[8] == playerGUID) and ((strsub(payload[2], -6) == "DAMAGE")) then
-		local eventTime = payload[1]
-		local subevent = payload[2]
-		local fade
+	local subevent = payload[2] -- In this case, the subevent is the type of damage
+	if (payload[8] == playerGUID) and ((strsub(subevent, -6) == "DAMAGE")) then
+		if (timer) then timer:Cancel() end -- Cancel any existing timer 
+		timer = C_Timer.NewTimer(durationDTPS, function() initialiseWidgets() end) -- Start a new timer to set the display to "No Damage" when the damage time series is empty
 
+		local eventTime = payload[1]
+		local amount, name
 		if (subevent == "SWING_DAMAGE") then
-			frame.amountDTPS:SetText(updateDTPS(eventTime, payload[12]))
+			amount = payload[12]
 			local found
-			if (payload[3]) then frame.spellName:SetText("Hidden Caster")
+			if (payload[3]) then name = "Hidden Caster"
 			else 
-				frame.spellName:SetText(payload[5])
+				name = payload[5]
 				local nameplates = C_NamePlate.GetNamePlates()
 				for i, v in ipairs(nameplates) do
 					if (UnitGUID(nameplates[i].namePlateUnitToken) == payload[4]) then
@@ -278,39 +279,35 @@ function events:COMBAT_LOG_EVENT_UNFILTERED()
 					end
 				end
 			end
-			if (found) then SetPortraitTexture(frame.icon, found, true) 
-			else frame.icon:SetTexture(237274) -- Skull icon signifies source of damage is hidden
+			if (found) then 
+				SetPortraitTexture(frame.icon, found, true) 
+			else 
+				frame.icon:SetTexture(237274) -- Skull icon indicates that the source of the damage is hidden
 			end
-			frame.amountDMG:SetText(payload[12])
-			frame.mask:SetVertexColor(1, 1, 1) -- Yellow frame for SWING_DAMAGE
-			fade = fadeOther
 
 		elseif (subevent == "ENVIRONMENTAL_DAMAGE") then
-			frame.amountDTPS:SetText(updateDTPS(eventTime, payload[13]))
-			frame.spellName:SetText(payload[12])
-			frame.icon:SetTexture(damageIcon[payload[12]])
-			frame.amountDMG:SetText(payload[13])
-			frame.mask:SetVertexColor(1, 0, 0) -- Red frame for ENVIRONMENTAL_DAMAGE
-			fade = fadePeriodic
+			amount = payload[13]
+			name = payload[12]
+			frame.icon:SetTexture(damageIcon[name])
 
-		else 
-			frame.amountDTPS:SetText(updateDTPS(eventTime, payload[15]))
-			frame.spellName:SetText(payload[13])
-			frame.icon:SetTexture(select(3, GetSpellInfo(payload[12])))
-			frame.amountDMG:SetText(payload[15])
-			if (subevent == "SPELL_PERIODIC_DAMAGE") then 
-				frame.mask:SetVertexColor(1, 0, 0) -- Red frame
-				fade = fadePeriodic
-			else 
-				frame.mask:SetVertexColor(1, 1, 1) -- Yellow frame for RANGE_DAMAGE and SPELL_DAMAGE
-				fade = fadeOther
-			end
+		else -- Damage type is RANGE_DAMAGE or SPELL_DAMAGE
+			amount = payload[15]
+			name = payload[13]
+			frame.icon:SetTexture(select(3, GetSpellInfo(payload[12]))) -- payload[12] is the spellID, GetSpellInfo(spellID) returns the spell's icon as its 3rd value
 		end
-	if (timer) then timer:Cancel() end -- Cancel any existing timer 
-	timer = C_Timer.NewTimer(durationDTPS, function() initialiseWidgets() end) -- Start a new timer to set the display to "No Damage" after a few seconds
 
-	frame:Show()
-	UIFrameFadeOut(frame, fade, 1, 0)
+		frame.amountDTPS:SetText(updateDTPS(eventTime, amount))
+		frame.spellName:SetText(name)
+		frame.amountDMG:SetText(amount)
+
+		frame:Show()
+		if (subevent == "SPELL_PERIODIC_DAMAGE") or (subevent == "ENVIRONMENTAL_DAMAGE") then 
+			frame.mask:SetVertexColor(1, 0, 0) -- Red frame
+			UIFrameFadeOut(frame, fadePeriodic, 1, 0)
+		else 
+			frame.mask:SetVertexColor(1, 1, 1) -- Yellow frame for RANGE_DAMAGE and SPELL_DAMAGE
+			UIFrameFadeOut(frame, fadeOther, 1, 0)
+		end
 	end
 end
 
