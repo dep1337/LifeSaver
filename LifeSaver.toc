@@ -1,0 +1,5 @@
+## Interface: 101000
+## Title: LifeSaver
+## Notes: Generic addon frame
+## Version: 1.0
+LifeSaver.lua
