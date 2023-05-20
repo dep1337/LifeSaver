@@ -33,7 +33,7 @@ local frame = CreateFrame("Frame", addonName, UIParent, "SimplePanelTemplate") -
 	frame.bar = CreateFrame("StatusBar", nil, frame)
 		frame.health = frame.bar:CreateFontString(nil, "OVERLAY", fontName)
 	frame.button = CreateFrame("Button", nil, frame, "MagicButtonTemplate") -- Button defined in SharedXML/SharedUIPanelTemplates.xml
-local timer -- Currently unused (see commented-out text in events:COMBAT_LOG_EVENT_UNFILTERED())
+local timer -- Timer for switch to "No Damage" frame
 
 -- Set the position and size of the frame (leave room for the widgets within frame.Inset)
 local left, top = select(4, frame.Inset:GetPointByName("TOPLEFT"))
@@ -57,15 +57,19 @@ local damageIcon = {}
 	damageIcon.Lava = 237583
 	damageIcon.Slime = 134437
 
--- Array of field names for the payload to COMBAT_LOG_EVENT_UNFILTERED (currently unused)
-local payloadKey = {timestamp,	subevent, hideCaster, sourceGUID, sourceName, sourceFlags, sourceRaidFlags, destGUID, destName, destFlags, destRaidFlags, 
+-- Array of field names for the payload to COMBAT_LOG_EVENT_UNFILTERED (not currently used)
+local payloadKey = {
+	timestamp, subevent, hideCaster, sourceGUID, sourceName, sourceFlags, sourceRaidFlags, destGUID, destName, destFlags, destRaidFlags, 
 	spellId, spellName, spellSchool, 
-	amount, overkill, school, resisted, blocked, absorbed, critical, glancing, crushing, isOffHand, environmentalType }
+	amount, overkill, school, resisted, blocked, absorbed, critical, glancing, crushing, isOffHand, 
+	environmentalType
+}
 
 -- Array of timestamps and damage over the last few seconds' worth of COMBAT_LOG_EVENT_UNFILTERED events
 local DTPS = {} -- Time series used to calculate average DTPS over the last few seconds (weighted towards more recent damage)
-local fade = 2 -- Period over which to fade out the display (after each COMBAT_LOG_EVENT_UNFILTERED event)
-local durationDTPS = 5 -- Include the last 5 seconds of damage in the DTPS calculation
+local durationDTPS = 5 -- Include the last 5 seconds of damage in the DTPS time series
+local fadePeriodic = 2 -- In respect of SPELL_PERIODIC_DAMAGE and ENVIRONMENTAL_DAMAGE, fade out frame over 2 seconds
+local fadeOther = 6 -- In respect of other types of damage, fade out frame over 6 seconds
 
 -----------------------------------------------------------------------------
 -- SECTION 1.1: Debugging utilities 
@@ -94,16 +98,6 @@ end
 --------------------------------------------------------------------------------------
 -- SECTION 2.1: Callback and support functions for the parent frames and child widgets
 --------------------------------------------------------------------------------------
--- Initialise icon and font strings (also occurs after a few seconds with no damage - see events:COMBAT_LOG_EVENT_UNFILTERED())
--- Currently unused because, due to frame fadeout, these values would never be seen
-local function initialiseWidgets()
-	frame.icon:SetTexture(133712) -- Happy party bomb icon signifying no damage over the last few seconds
-	frame.amountDTPS:SetText("0")
-	frame.spellName:SetText("No Damage")
-	frame.amountDMG:SetText("0")
-	frame:Hide()
-end
-
 -- Set up the damage icon (center of the frame)
 local function setIcon()
 	local icon = frame.icon
@@ -167,6 +161,16 @@ local function setButton()
 	button:SetPoint("BOTTOM", frame, "BOTTOM", 0, 4)
 	button:SetText("Close")
 	button:SetScript("OnClick", function(self, mouseButton, down) frame:Hide() end)
+end
+
+-- Initialise icon and font strings (also occurs after a few seconds with no damage - see events:COMBAT_LOG_EVENT_UNFILTERED())
+local function initialiseWidgets()
+	frame.icon:SetTexture(133712) -- Party G.R.E.N.A.D.E. icon signifies no damage over the last few seconds
+	frame.amountDTPS:SetText("0")
+	frame.spellName:SetText("No Damage")
+	frame.amountDMG:SetText("0")
+	frame.mask:SetVertexColor(1, 1, 1)
+	frame:Hide()
 end
 
 -- Get the current health and maximum health of the player, then update the health bar as required
@@ -252,12 +256,13 @@ end
 -----------------------------------------------------------------------------
 local events = {}
 
--- Process combat log damage events that affect the player
+-- Process combat log events in respect of damage to the player
 function events:COMBAT_LOG_EVENT_UNFILTERED()
 	local payload = {CombatLogGetCurrentEventInfo()}
 	if (payload[8] == playerGUID) and ((strsub(payload[2], -6) == "DAMAGE")) then
 		local eventTime = payload[1]
 		local subevent = payload[2]
+		local fade
 
 		if (subevent == "SWING_DAMAGE") then
 			frame.amountDTPS:SetText(updateDTPS(eventTime, payload[12]))
@@ -274,10 +279,11 @@ function events:COMBAT_LOG_EVENT_UNFILTERED()
 				end
 			end
 			if (found) then SetPortraitTexture(frame.icon, found, true) 
-			else frame.icon:SetTexture(237274) -- Skull icon signifying source of damage is hidden
+			else frame.icon:SetTexture(237274) -- Skull icon signifies source of damage is hidden
 			end
 			frame.amountDMG:SetText(payload[12])
 			frame.mask:SetVertexColor(1, 1, 1) -- Yellow frame for SWING_DAMAGE
+			fade = fadeOther
 
 		elseif (subevent == "ENVIRONMENTAL_DAMAGE") then
 			frame.amountDTPS:SetText(updateDTPS(eventTime, payload[13]))
@@ -285,24 +291,30 @@ function events:COMBAT_LOG_EVENT_UNFILTERED()
 			frame.icon:SetTexture(damageIcon[payload[12]])
 			frame.amountDMG:SetText(payload[13])
 			frame.mask:SetVertexColor(1, 0, 0) -- Red frame for ENVIRONMENTAL_DAMAGE
+			fade = fadePeriodic
 
 		else 
 			frame.amountDTPS:SetText(updateDTPS(eventTime, payload[15]))
 			frame.spellName:SetText(payload[13])
 			frame.icon:SetTexture(select(3, GetSpellInfo(payload[12])))
 			frame.amountDMG:SetText(payload[15])
-			if (subevent == "SPELL_PERIODIC_DAMAGE") then frame.mask:SetVertexColor(1, 0, 0) -- Red frame
-			else frame.mask:SetVertexColor(1, 1, 1) -- Yellow frame for RANGE_DAMAGE and SPELL_DAMAGE
+			if (subevent == "SPELL_PERIODIC_DAMAGE") then 
+				frame.mask:SetVertexColor(1, 0, 0) -- Red frame
+				fade = fadePeriodic
+			else 
+				frame.mask:SetVertexColor(1, 1, 1) -- Yellow frame for RANGE_DAMAGE and SPELL_DAMAGE
+				fade = fadeOther
 			end
 		end
---	if (timer) then timer:Cancel() end -- Cancel any existing timer 
---	timer = C_Timer.NewTimer(durationDTPS, function() initialiseWidgets() end) -- Set a new timer to clear the display after a few seconds
---	frame:Show()
+	if (timer) then timer:Cancel() end -- Cancel any existing timer 
+	timer = C_Timer.NewTimer(durationDTPS, function() initialiseWidgets() end) -- Start a new timer to set the display to "No Damage" after a few seconds
+
+	frame:Show()
 	UIFrameFadeOut(frame, fade, 1, 0)
 	end
 end
 
--- Fires when the addon finishes loading (saved variables should now be available)
+-- Fires when the addon finishes loading
 function events:ADDON_LOADED(name)
 	if (name == addonName) then
 --	dumpTable(frame)
@@ -315,7 +327,7 @@ function events:ADDON_LOADED(name)
 		setIcon()
 		setHealth()
 		setFontStrings()
---		initialiseWidgets()
+		initialiseWidgets()
 		setButton()
 		frame:Hide()
 
@@ -326,9 +338,6 @@ end
 
 -- Fires *after* ADDON_LOADED and PLAYER_LOGIN (player health data should now be available)
 function events:PLAYER_ENTERING_WORLD(isInitialLogin, isReloadingUI)
-	if (lsReports) then 
-		print("Login: ", isInitialLogin, "Reload: ", isReloadingUI)
-	end
 	playerGUID = UnitGUID("player")
 	updateHealth()
 end
@@ -360,6 +369,7 @@ local helptext = {} -- Table of helptext for each slash command
 
 -- Show the parent frame
 slash.show = function ()
+	frame:SetAlpha(1)
 	frame:Show()
 end
 helptext.show = "Show the parent frame"
@@ -379,7 +389,7 @@ end
 helptext.reset = "Reset the position of the parent frame"
 
 -- Display the player's standing with the Obsidian Warders or Dark Talons (as the case may be)
--- This is only here because the standard UI does not make this information available
+-- The "renown" command is only here because the default UI does not provide this information
 slash.renown = function ()
 	local faction
 	if (UnitFactionGroup("player") == "Alliance") then faction = 2524 -- Faction ID 2524 is the Obsidian Warders
