@@ -1,5 +1,5 @@
 -----------------------------------------------------------------------------
---  World of Warcraft addOn to display a player's combat damage
+--  World of Warcraft addOn to display a player's damage taken, and its source
 --
 --  (c) May 2023 Duncan Baxter & Jennifer Kennedy
 --
@@ -66,9 +66,13 @@ local payloadKey = {
 
 -- Array of timestamps and damage over the last few seconds' worth of COMBAT_LOG_EVENT_UNFILTERED events
 local DTPS = {} -- Time series used to calculate average DTPS over the last few seconds (weighted towards more recent damage)
-local durationDTPS = 5 -- Include the last 5 seconds of damage in the DTPS time series
-local fadePeriodic = 2 -- In respect of SPELL_PERIODIC_DAMAGE and ENVIRONMENTAL_DAMAGE, fade out frame over 2 seconds
-local fadeOther = 6 -- In respect of other types of damage, fade out frame over 6 seconds
+
+-- Initialise SavedVariables if required
+if (not durationDTPS) then durationDTPS = 5 end -- Include the last 5 seconds of damage in the DTPS time series
+if (not variance) then variance = 2 end -- Current damage carries twice the weight of the oldest damage 
+if (not fadePeriodic) then fadePeriodic = 2 end -- In respect of SPELL_PERIODIC_DAMAGE and ENVIRONMENTAL_DAMAGE, fade out frame over 2 seconds
+if (not fadeOther) then fadeOther = 6 end -- In respect of other types of damage, fade out frame over 6 seconds
+if (groupReports == nil) then groupReports = false end -- Do not post interrupt and dispel messages to a group chat channel
 
 -----------------------------------------------------------------------------
 -- SECTION 1.1: Debugging utilities 
@@ -169,7 +173,6 @@ local function initialiseWidgets()
 	frame.spellName:SetText("No Damage")
 	frame.amountDMG:SetText("0")
 	frame.mask:SetVertexColor(1, 1, 1)
-	frame:Hide()
 end
 
 -- Get the current health and maximum health of the player, then update the health bar as required
@@ -231,39 +234,74 @@ frame:SetScript("OnLeave", function(self, motion) GameTooltip:Hide() end)
 -----------------------------------------------------------------------------
 -- SECTION 3.1: Callback and support functions for the event handlers
 -----------------------------------------------------------------------------
+-- Set the communications channel for CLEU events where the sourceGUID is the player or their pet
+local function setChannel()
+	local channel
+	if (groupReports) then -- Does the player want reports to be sent to the group chat channel?
+		if (IsInGroup(LE_PARTY_CATEGORY_INSTANCE)) then channel = "INSTANCE_CHAT"
+		elseif (IsInGroup(LE_PARTY_CATEGORY_HOME)) then
+			if (IsInRaid(LE_PARTY_CATEGORY_HOME)) then channel = "RAID"
+			else channel = "PARTY" end
+		else
+			channel = nil
+		end
+	end
+	return channel -- Nil means we should use the "print" channel
+end
+
 -- Update "Damage Taken Per Second" (over the last few seconds)
 local function updateDTPS(timestamp, amount)
-	tinsert(DTPS, {timestamp, amount}) -- Add new time/damage pair to the set
+	tinsert(DTPS, {timestamp, amount}) -- Add new time/damage pair to the time series
 
-	local now = GetServerTime()	-- Remove expired damage (ie. more than a few seconds old) from the set 
-	while ((now - DTPS[1][1]) > durationDTPS) do
-		tremove(DTPS, 1)
-	end
+	local now = GetServerTime()	-- Remove expired time/damage pairs from the time series 
+	while ((now - DTPS[1][1]) > durationDTPS) do tremove(DTPS, 1) end
 
-	local total, base = 0, 0 -- Calculate weighted average damage over the last few seconds
-	local weight
+	local weight -- Calculate weighted average damage over the time series
+	local total, base = 0, 0
 	for i, v in ipairs(DTPS) do
-		weight = (durationDTPS * 2) - (now - v[1]) -- Weight recent damage more heavily than older damage
+		weight = 1 + (((variance - 1)/durationDTPS) * (durationDTPS - (now - v[1]))) -- Weight current damage "variance" times more heavily than older damage
 		total = total + (weight * v[2])
 		base = base + weight
 	end
 	return floor(0.5 + (total / base)) -- Round the result to the nearest integer
 end
 
------------------------------------------------------------------------------
--- SECTION 3.2: Event handlers
------------------------------------------------------------------------------
-local events = {}
+-- Display CLEU "_INTERRUPT" and "_DISPEL" subevents where the sourceGUID is the player
+local function sourceIsPlayer(payload)
+	local subevent = payload[2]	
+	local channel = setChannel()
+	local message
+	if (strsub(subevent, -9) == "INTERRUPT") then
+		message = format("%s fat-fingered %s and fortuitously interrupted %s's %s!", payload[5], payload[13], payload[9], payload[16])
+		if (not channel) then print(message)
+		else SendChatMessage(message, channel) end
+	elseif (strsub(subevent, -6) == "DISPEL") then
+		message = format("%s fat-fingered %s and accidentally dispelled %s from %s!", payload[5], payload[13], payload[16], payload[9])
+		if (not comms) then print(message)
+		else SendChatMessage(message, channel) end
+	end
+end
 
--- Display combat log events in respect of damage to the player
-function events:COMBAT_LOG_EVENT_UNFILTERED()
-	local payload = {CombatLogGetCurrentEventInfo()}
-	local subevent = payload[2] -- In this case, the subevent is the type of damage
-	if (payload[8] == playerGUID) and ((strsub(subevent, -6) == "DAMAGE")) then
+-- Display CLEU "_AURA_APPLIED" subevents where the sourceGUID is the player's pet (eg. a stun)
+local function sourceIsPet(payload)
+	local subevent = payload[2]	
+	local channel = setChannel()
+	local message
+	if ((strsub(subevent, -12) == "AURA_APPLIED") and (payload[12] == 24394)) then
+		message = format("%s broke wind and stunned %s!  What *has* that beast been eating?", payload[5], payload[9])
+		if (not channel) then print(message)
+		else SendChatMessage(message, channel) end
+	end
+end
+
+-- Display CLEU "_DAMAGE" subevents where the destGUID is the player
+local function targetIsPlayer(payload)
+	local eventTime = payload[1]
+	local subevent = payload[2]
+	if (strsub(subevent, -6) == "DAMAGE") then
 		if (timer) then timer:Cancel() end -- Cancel any existing timer 
 		timer = C_Timer.NewTimer(durationDTPS, function() initialiseWidgets() end) -- Start a new timer to set the display to "No Damage" when the damage time series is empty
 
-		local eventTime = payload[1]
 		local amount, name
 		if (subevent == "SWING_DAMAGE") then
 			amount = payload[12]
@@ -311,6 +349,21 @@ function events:COMBAT_LOG_EVENT_UNFILTERED()
 	end
 end
 
+-----------------------------------------------------------------------------
+-- SECTION 3.2: Event handlers
+-----------------------------------------------------------------------------
+local events = {}
+
+-- Display relevant combat log events (eg. damage to the player)
+function events:COMBAT_LOG_EVENT_UNFILTERED()
+	local payload = {CombatLogGetCurrentEventInfo()}
+	local subevent = payload[2]
+	if (payload[8] == playerGUID) then targetIsPlayer(payload)
+	elseif (payload[4] == playerGUID) then sourceIsPlayer(payload)
+	elseif (UnitExists("pet")) and (payload[4] == UnitGUID("pet")) then sourceIsPet(payload)
+	end
+end
+
 -- Fires when the addon finishes loading
 function events:ADDON_LOADED(name)
 	if (name == addonName) then
@@ -326,7 +379,7 @@ function events:ADDON_LOADED(name)
 		setFontStrings()
 		initialiseWidgets()
 		setButton()
-		frame:Hide()
+		UIFrameFadeOut(frame, fadeOther, 1, 0)
 
 		frame:UnregisterEvent("ADDON_LOADED")
 		print(text.loaded)
@@ -368,22 +421,68 @@ local helptext = {} -- Table of helptext for each slash command
 slash.show = function ()
 	frame:SetAlpha(1)
 	frame:Show()
+	print(addonName .. ": Display frame is now shown")
 end
-helptext.show = "Show the parent frame"
+helptext.show = " = Show the parent frame"
 
 -- Hide the parent frame
 slash.hide = function () 
 	frame:Hide()
+	print(addonName .. ": Display frame has been hidden")
 end
-helptext.hide = "Hide the parent frame (equivalent to pressing either 'close' button)"
+helptext.hide = " = Hide the parent frame (equivalent to pressing either 'close' button)"
 
 -- Reset the position of the parent frame
 slash.reset = function ()
 	frame:ClearAllPoints()
 	frame:SetPoint("CENTER")
 	frame:SetSize(width, height)
+	print(addonName .. ": Position and size of display frame has been reset")
 end
-helptext.reset = "Reset the position of the parent frame"
+helptext.reset = " = Reset the position of the parent frame"
+
+-- Set the length (in seconds) of the time series we maintain to calculate DTPS
+slash.dtps = function (subcmd)
+	local value = tonumber(subcmd)
+	if (value) then durationDTPS = value end
+	print(addonName .. ": Length of the DTPS time series is " .. durationDTPS .. " seconds")
+end
+helptext.dtps = " # = Set the length (in seconds) of the time series we maintain to calculate DTPS"
+
+-- Set the weight of current damage, relative to the oldest damage, in the time series we maintain to calculate DTPS
+slash.variance = function (subcmd)
+	local value = tonumber(subcmd)
+	if (value) then variance = value end
+	print(addonName .. ": Weight for current damage in the DTPS time series is " .. variance .. " times")
+end
+helptext.variance = " # = Set the weight for current damage in the DTPS time series"
+
+-- Period over which to fade out the display for SPELL_PERIODIC_DAMAGE and ENVIRONMENTAL_DAMAGE
+slash.fadeticking = function (subcmd)
+	local value = tonumber(subcmd)
+	if (value) then fadePeriodic = value end
+	print(addonName .. ": Period over which to fade the display for ticking damage is " .. fadePeriodic .. " seconds")
+end
+helptext.fadeticking = " (or ft) # = Set the period (in seconds) to fade the display for ticking damage"
+
+-- Period over which to fade out the display for other (non-ticking) damage
+slash.fadeother = function (subcmd)
+	local value = tonumber(subcmd)
+	if (value) then fadeOther = value end
+	print(addonName .. ": Period over which to fade the display for non-ticking damage is " .. fadeOther .. " seconds")
+end
+helptext.fadeother = " (or fo) # = Set the period (in seconds) to fade the display for non-ticking damage"
+
+-- Turn on or off interrupt and dispel reporting to group chat channels
+slash.groupreports = function(subcmd)
+	if (subcmd == "on") then groupReports = true
+	elseif (subcmd == "off") then groupReports = false end
+	local status
+	if (groupReports) then status = "ON"
+	else status = "OFF" end
+	print(addonName .. ": Reporting to group chat channels is " .. status)
+end
+helptext.groupreports = " (or gr) on/off = Turn on or off reporting to group chat channels"
 
 -- Display the player's standing with the Obsidian Warders or Dark Talons (as the case may be)
 -- The "renown" command is only here because the default UI does not provide this information
@@ -398,28 +497,31 @@ slash.renown = function ()
 		print(format("Progress to %s: %d/%d", _G["FACTION_STANDING_LABEL" .. standingID + 1], (barValue - barMin), (barMax - barMin))) 
 	end
 end
-helptext.renown = "Display the player's standing with the Obsidian Warders or Dark Talons"
+helptext.renown = " = Display the player's standing with the Obsidian Warders or Dark Talons"
 
 -- Print helptext for each slash command
 slash.help = function ()
-	print(format("Slash commands for %s:", addonName))
-	print(format("Use /%s or /%s (either upper or lower case, or a combination of the two)\n\n", strlower(addonName), strlower(strsub(addonName, 1, 2))))
-	local order = {"show", "hide", "reset", "renown", "help"} -- Order in which to print the slash commands and their helptext
-	for i, v in pairs(order) do
-		print(format("/%s %s = %s", strlower(strsub(addonName, 1, 2)), v, helptext[v]))
+	print(format("/n/nSlash commands for %s:", addonName))
+	print(format("Use /%s or /%s (either upper or lower case, or a combination of the two) with:", strlower(addonName), strlower(strsub(addonName, 1, 2))))
+	local order = {"show", "hide", "reset", "dtps", "variance", "fadeticking", "fadeother", "groupreports", "renown", "help"} -- Order in which to print the slash commands and their helptext
+	for i, v in ipairs(order) do
+		print(format("/%s %s%s", strlower(strsub(addonName, 1, 2)), v, helptext[v]))
 	end
-	print("\n")
+	print(format("For slash commands that require a value (eg. on/off), omit the value to print it out\n\n"))
 end
-helptext.help = "Print this helptext ('h' and '?' also work)"
+helptext.help = " (also h or ?) = Print this helptext"
 
 -- Define the callback handler for our slash commands
 local function cbSlash(msg, editBox)
-	local cmd = strlower(msg)
+	local msgLower = strlower(msg) -- Convert command line to lowercase for simplicity
+	local cmd, subcmd = strsplit(" ", msg, 2)
+	if (cmd == "ft") then cmd = "fadeticking" end
+	if (cmd == "fo") then cmd = "fadeother" end
+	if (cmd == "gr") then cmd = "groupreports" end
 	if (cmd == "?") or (cmd == "h") then cmd = "help" end
 	if (slash[cmd] == nil) then print(addonName .. ": Unknown slash command (" .. msg .. ")")
 	else
-		slash[cmd]()
-		print(addonName .. ": Processed (" .. msg .. ") command")
+		slash[cmd](subcmd)
 	end
 end
 
