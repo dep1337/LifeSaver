@@ -1,5 +1,6 @@
-## Interface: 101000
+## Interface: 100100
 ## Title: LifeSaver
-## Notes: Generic addon frame
+## Notes: World of Warcraft addOn to display a player's damage taken, and its source
+## SavedVariables: groupReports, durationDTPS, variance, fadePeriodic, fadeOther 
 ## Version: 1.0
 LifeSaver.lua
